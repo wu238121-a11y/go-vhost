@@ -96,15 +96,12 @@ type TLSConn struct {
 // TLS parses the ClientHello message on conn and returns
 // a new, unread connection with metadata for virtual host muxing
 func TLS(conn net.Conn) (tlsConn *TLSConn, err error) {
-	fmt.Printf("DEBUG: Starting TLS parsing on connection from %s\n", conn.RemoteAddr().String())
 	c, rd := newShared(conn)
 
 	tlsConn = &TLSConn{sharedConn: c}
 	if tlsConn.ClientHelloMsg, err = readClientHello(rd); err != nil {
-		fmt.Printf("DEBUG: Failed to read ClientHello: %v\n", err)
 		return
 	}
-	fmt.Printf("DEBUG: Successfully parsed ClientHello for host: %s\n", tlsConn.Host())
 
 	return
 }
@@ -160,7 +157,6 @@ func (c *TLSConn) JA4Raw() string {
 }
 
 func (c *TLSConn) Free() {
-	fmt.Printf("DEBUG: Freeing ClientHelloMsg resources\n")
 	c.ClientHelloMsg = nil
 	c.ja4 = ""
 	c.ja4A = ""
@@ -430,33 +426,26 @@ func splitBlock(b *block, n int) (*block, *block) {
 // readHandshake reads the next handshake message from
 // the record layer.
 func readClientHello(rd io.Reader) (*ClientHelloMsg, error) {
-	fmt.Printf("DEBUG: Entering readClientHello\n")
 	var nextBlock *block  // raw input, right off the wire
 	var hand bytes.Buffer // handshake data waiting to be read
 
 	// readRecord reads the next TLS record from the connection
 	// and updates the record layer state.
 	readRecord := func() error {
-		fmt.Printf("DEBUG: Entering readRecord\n")
 		// Caller must be in sync with connection:
 		// handshake data if handshake not yet completed,
 		// else application data.  (We don't support renegotiation.)
 		if nextBlock == nil {
 			nextBlock = newBlock()
-			fmt.Printf("DEBUG: Allocated new block for nextBlock\n")
 		}
 		b := nextBlock
 
 		// Read header, payload.
 		if err := b.readFromUntil(rd, recordHeaderLen); err != nil {
-			fmt.Printf("DEBUG: Failed to read record header: %v\n", err)
 			return err
 		}
-		fmt.Printf("DEBUG: Read record header successfully (len=%d)\n", len(b.data))
-		fmt.Printf("DEBUG: record header: %x\n", b.data[:recordHeaderLen])
 
 		typ := recordType(b.data[0])
-		fmt.Printf("DEBUG: record type: 0x%02x\n", typ)
 
 		// No valid TLS record has a type of 0x80, however SSLv2 handshakes
 		// start with a uint16 length where the MSB is set and the first record
@@ -464,16 +453,13 @@ func readClientHello(rd io.Reader) (*ClientHelloMsg, error) {
 		// an SSLv2 client.
 		if typ == 0x80 {
 			err := errors.New("tls: unsupported SSLv2 handshake received")
-			fmt.Printf("DEBUG: Detected unsupported SSLv2: %v\n", err)
 			return err
 		}
 
 		vers := uint16(b.data[1])<<8 | uint16(b.data[2])
 		n := int(b.data[3])<<8 | int(b.data[4])
-		fmt.Printf("DEBUG: record version: 0x%04x, length: %d\n", vers, n)
 		if n > maxCiphertext {
 			err := alertRecordOverflow
-			fmt.Printf("DEBUG: Record length exceeds maxCiphertext (%d > %d): %v\n", n, maxCiphertext, err)
 			return err
 		}
 
@@ -485,20 +471,16 @@ func readClientHello(rd io.Reader) (*ClientHelloMsg, error) {
 		// Modern browsers can send large ClientHello messages with many extensions.
 		if typ != recordTypeHandshake {
 			err := alertUnexpectedMessage
-			fmt.Printf("DEBUG: Unexpected record type (typ=0x%02x != handshake): %v\n", typ, err)
 			return err
 		}
 		if vers >= 0x1000 {
 			err := alertUnexpectedMessage
-			fmt.Printf("DEBUG: Unexpected version (vers=0x%04x >= 0x1000): %v\n", vers, err)
 			return err
 		}
 
 		if err := b.readFromUntil(rd, recordHeaderLen+n); err != nil {
-			fmt.Printf("DEBUG: Failed to read full record payload: %v\n", err)
 			return err
 		}
-		fmt.Printf("DEBUG: Read full record payload successfully (total len=%d)\n", recordHeaderLen+n)
 
 		// Process message.
 		b, nextBlock = splitBlock(b, recordHeaderLen+n)
@@ -506,20 +488,16 @@ func readClientHello(rd io.Reader) (*ClientHelloMsg, error) {
 		data := b.data[b.off:]
 		if len(data) > maxPlaintext {
 			err := alertRecordOverflow
-			fmt.Printf("DEBUG: Payload exceeds maxPlaintext (%d > %d): %v\n", len(data), maxPlaintext, err)
 			return err
 		}
-		fmt.Printf("DEBUG: Appending %d bytes to handshake buffer\n", len(data))
 
 		// DEBUG: show first bytes of the record payload we append to handshake buffer
 		show := 32
 		if len(data) < show {
 			show = len(data)
 		}
-		fmt.Printf("DEBUG: record payload first %d bytes: %x (payload len=%d)\n", show, data[:show], len(data))
 
 		hand.Write(data)
-		fmt.Printf("DEBUG: Exiting readRecord successfully\n")
 		return nil
 	}
 
@@ -528,43 +506,32 @@ func readClientHello(rd io.Reader) (*ClientHelloMsg, error) {
 	}
 
 	data := hand.Bytes()
-	fmt.Printf("DEBUG: Handshake buffer after first record: len=%d\n", len(data))
 	if len(data) < 4 {
 		err := alertUnexpectedMessage
-		fmt.Printf("DEBUG: Handshake data too short (<4 bytes): %v\n", err)
 		return nil, err
 	}
 	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
-	fmt.Printf("DEBUG: Handshake message length: %d\n", n)
 	if n > maxHandshake {
 		err := alertInternalError
-		fmt.Printf("DEBUG: Handshake length exceeds max (%d > %d): %v\n", n, maxHandshake, err)
 		return nil, err
 	}
 	for hand.Len() < 4+n {
-		fmt.Printf("DEBUG: Need more handshake data (current len=%d, target=%d)\n", hand.Len(), 4+n)
 		if err := readRecord(); err != nil {
 			return nil, err
 		}
 	}
-	fmt.Printf("DEBUG: Collected full handshake data (len=%d)\n", hand.Len())
 
 	data = hand.Next(4 + n)
-	fmt.Printf("DEBUG: Extracted ClientHello data slice (len=%d)\n", len(data))
 	if data[0] != typeClientHello {
 		err := alertUnexpectedMessage
-		fmt.Printf("DEBUG: Not a ClientHello message (type=0x%02x): %v\n", data[0], err)
 		return nil, err
 	}
-	fmt.Printf("DEBUG: Confirmed ClientHello message type\n")
 
 	msg := new(ClientHelloMsg)
 	if !msg.unmarshal(data) {
 		err := alertUnexpectedMessage
-		fmt.Printf("DEBUG: unmarshal failed: %v\n", err)
 		return nil, err
 	}
-	fmt.Printf("DEBUG: Exiting readClientHello successfully\n")
 	return msg, nil
 }
 
@@ -589,35 +556,25 @@ type ClientHelloMsg struct {
 }
 
 func (m *ClientHelloMsg) unmarshal(data []byte) bool {
-	fmt.Printf("DEBUG: Starting unmarshal (len=%d)\n", len(data))
 	if len(data) < 42 {
-		fmt.Printf("DEBUG: FAIL - Data too short (len=%d < 42)\n", len(data))
 		return false
 	}
 	m.Raw = data
 	m.Vers = uint16(data[4])<<8 | uint16(data[5])
-	fmt.Printf("DEBUG: Parsed version: 0x%04x\n", m.Vers)
 	m.Random = data[6:38]
-	fmt.Printf("DEBUG: Copied random bytes (len=%d)\n", len(m.Random))
 	sessionIdLen := int(data[38])
-	fmt.Printf("DEBUG: sessionIdLen=%d\n", sessionIdLen)
 	if sessionIdLen > 32 || len(data) < 39+sessionIdLen {
-		fmt.Printf("DEBUG: FAIL - sessionIdLen invalid (len=%d >32 or data too short)\n", sessionIdLen)
 		return false
 	}
 	m.SessionId = data[39 : 39+sessionIdLen]
-	fmt.Printf("DEBUG: Parsed session ID (len=%d)\n", len(m.SessionId))
 	data = data[39+sessionIdLen:]
 	if len(data) < 2 {
-		fmt.Printf("DEBUG: FAIL - missing cipher suite length\n")
 		return false
 	}
 	// cipherSuiteLen is the number of bytes of cipher suite numbers. Since
 	// they are uint16s, the number must be even.
 	cipherSuiteLen := int(data[0])<<8 | int(data[1])
-	fmt.Printf("DEBUG: cipherSuiteLen=%d, remaining len=%d\n", cipherSuiteLen, len(data))
 	if cipherSuiteLen%2 == 1 || len(data) < 2+cipherSuiteLen {
-		fmt.Printf("DEBUG: FAIL - cipherSuiteLen invalid (odd or too short)\n")
 		return false
 	}
 	numCipherSuites := cipherSuiteLen / 2
@@ -625,23 +582,17 @@ func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 	for i := 0; i < numCipherSuites; i++ {
 		m.CipherSuites[i] = uint16(data[2+2*i])<<8 | uint16(data[3+2*i])
 	}
-	fmt.Printf("DEBUG: Parsed %d cipher suites\n", numCipherSuites)
 	data = data[2+cipherSuiteLen:]
 	if len(data) < 1 {
-		fmt.Printf("DEBUG: FAIL - missing compression methods length\n")
 		return false
 	}
 	compressionMethodsLen := int(data[0])
-	fmt.Printf("DEBUG: compressionMethodsLen=%d, remaining len=%d\n", compressionMethodsLen, len(data))
 	if len(data) < 1+compressionMethodsLen {
-		fmt.Printf("DEBUG: FAIL - compression methods overflow\n")
 		return false
 	}
 	m.CompressionMethods = data[1 : 1+compressionMethodsLen]
-	fmt.Printf("DEBUG: Parsed %d compression methods\n", len(m.CompressionMethods))
 
 	data = data[1+compressionMethodsLen:]
-	fmt.Printf("DEBUG: Remaining data after compression: len=%d\n", len(data))
 
 	m.NextProtoNeg = false
 	m.ServerName = ""
@@ -655,39 +606,30 @@ func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 
 	if len(data) == 0 {
 		// ClientHello is optionally followed by extension data
-		fmt.Printf("DEBUG: No extensions present\n")
 		return true
 	}
 	if len(data) < 2 {
-		fmt.Printf("DEBUG: FAIL - missing extensions length\n")
 		return false
 	}
 
 	extensionsLength := int(data[0])<<8 | int(data[1])
-	fmt.Printf("DEBUG: extensionsLength=%d, actual remaining=%d\n", extensionsLength, len(data)-2)
 	data = data[2:]
 	if extensionsLength != len(data) {
-		fmt.Printf("DEBUG: Warning - extensionsLength (%d) != actual remaining (%d); proceeding with min length\n", extensionsLength, len(data))
 		if extensionsLength > len(data) {
-			fmt.Printf("DEBUG: FAIL - declared extensionsLength larger than remaining data\n")
 			return false
 		}
 		// Proceed but only parse the declared extensionsLength bytes
 		data = data[:extensionsLength]
 	}
 
-	fmt.Printf("DEBUG: Starting extensions parsing loop\n")
 	for len(data) != 0 {
 		if len(data) < 4 {
-			fmt.Printf("DEBUG: FAIL - extension header truncated (len=%d <4)\n", len(data))
 			return false
 		}
 		extension := uint16(data[0])<<8 | uint16(data[1])
 		length := int(data[2])<<8 | int(data[3])
-		fmt.Printf("DEBUG: Parsing extension type=0x%04x, length=%d\n", extension, length)
 		data = data[4:]
 		if len(data) < length {
-			fmt.Printf("DEBUG: FAIL - extension %d length %d exceeds remaining %d\n", extension, length, len(data))
 			return false
 		}
 
@@ -695,30 +637,23 @@ func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 
 		switch extension {
 		case extensionServerName:
-			fmt.Printf("DEBUG: Parsing SNI extension\n")
 			if length < 2 {
-				fmt.Printf("DEBUG: FAIL - SNI extension too short (length=%d <2)\n", length)
 			} else {
 				numNames := int(data[0])<<8 | int(data[1])
-				fmt.Printf("DEBUG: SNI numNames=%d\n", numNames)
 				d := data[2:]
 				foundName := false
 				for i := 0; i < numNames; i++ {
 					if len(d) < 3 {
-						fmt.Printf("DEBUG: FAIL - SNI name header truncated (remaining=%d <3)\n", len(d))
 						break
 					}
 					nameType := d[0]
 					nameLen := int(d[1])<<8 | int(d[2])
-					fmt.Printf("DEBUG: SNI name %d: type=0x%02x, len=%d\n", i, nameType, nameLen)
 					d = d[3:]
 					if len(d) < nameLen {
-						fmt.Printf("DEBUG: FAIL - SNI name truncated (need=%d, have=%d)\n", nameLen, len(d))
 						break
 					}
 					if nameType == 0 {
 						m.ServerName = string(d[0:nameLen])
-						fmt.Printf("DEBUG: Parsed SNI ServerName: %s\n", m.ServerName)
 						foundName = true
 						break
 					}
@@ -729,26 +664,18 @@ func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 				}
 			}
 		case extensionNextProtoNeg:
-			fmt.Printf("DEBUG: Parsing NPN extension\n")
 			if length > 0 {
-				fmt.Printf("DEBUG: FAIL - NPN extension has unexpected data (length=%d >0)\n", length)
 			} else {
 				m.NextProtoNeg = true
-				fmt.Printf("DEBUG: Set NextProtoNeg=true\n")
 			}
 		case extensionStatusRequest:
-			fmt.Printf("DEBUG: Parsing OCSP stapling extension\n")
 			m.OcspStapling = length > 0 && data[0] == statusTypeOCSP
-			fmt.Printf("DEBUG: Set OcspStapling=%t\n", m.OcspStapling)
 		case extensionSupportedCurves:
-			fmt.Printf("DEBUG: Parsing supported curves extension\n")
 			// http://tools.ietf.org/html/rfc4492#section-5.5.1
 			if length < 2 {
-				fmt.Printf("DEBUG: FAIL - supported_curves too short (length=%d <2)\n", length)
 			} else {
 				l := int(data[0])<<8 | int(data[1])
 				if l%2 == 1 || length != l+2 {
-					fmt.Printf("DEBUG: FAIL - supported_curves invalid length (l=%d odd or !=%d)\n", l, length-2)
 				} else {
 					numCurves := l / 2
 					m.SupportedCurves = make([]uint16, numCurves)
@@ -757,63 +684,47 @@ func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 						m.SupportedCurves[i] = uint16(d[0])<<8 | uint16(d[1])
 						d = d[2:]
 					}
-					fmt.Printf("DEBUG: Parsed %d supported curves\n", numCurves)
 				}
 			}
 		case extensionSupportedPoints:
-			fmt.Printf("DEBUG: Parsing supported points extension\n")
 			// http://tools.ietf.org/html/rfc4492#section-5.5.2
 			if length < 1 {
-				fmt.Printf("DEBUG: FAIL - supported_points too short (length=%d <1)\n", length)
 			} else {
 				l := int(data[0])
 				if length != l+1 {
-					fmt.Printf("DEBUG: FAIL - supported_points invalid length (l=%d !=%d-1)\n", l, length)
 				} else {
 					m.SupportedPoints = make([]uint8, l)
 					copy(m.SupportedPoints, data[1:])
-					fmt.Printf("DEBUG: Parsed %d supported points\n", l)
 				}
 			}
 		case extensionSessionTicket:
-			fmt.Printf("DEBUG: Parsing session ticket extension\n")
 			// http://tools.ietf.org/html/rfc5077#section-3.2
 			m.TicketSupported = true
 			m.SessionTicket = data[:length]
-			fmt.Printf("DEBUG: Set TicketSupported=true, ticket len=%d\n", len(m.SessionTicket))
 		case extensionALPN:
-			fmt.Printf("DEBUG: Parsing ALPN extension\n")
 			if length < 2 {
-				fmt.Printf("DEBUG: FAIL - ALPN too short (length=%d <2)\n", length)
 			} else {
 				l := int(data[0])<<8 | int(data[1])
 				if l != length-2 {
-					fmt.Printf("DEBUG: FAIL - ALPN listLength mismatch (l=%d !=%d-2)\n", l, length)
 				} else {
 					d := data[2:length]
 					for len(d) != 0 {
 						stringLen := int(d[0])
 						d = d[1:]
 						if stringLen == 0 || stringLen > len(d) {
-							fmt.Printf("DEBUG: FAIL - ALPN invalid strLen (strLen=%d, remaining=%d)\n", stringLen, len(d))
 							break
 						}
 						protocol := string(d[:stringLen])
 						m.AlpnProtocols = append(m.AlpnProtocols, protocol)
-						fmt.Printf("DEBUG: Parsed ALPN protocol: %s\n", protocol)
 						d = d[stringLen:]
 					}
-					fmt.Printf("DEBUG: Parsed %d ALPN protocols total\n", len(m.AlpnProtocols))
 				}
 			}
 		case 13: // extension signature_algorithms
-			fmt.Printf("DEBUG: Parsing signature_algorithms extension\n")
 			if length < 2 {
-				fmt.Printf("DEBUG: FAIL - signature_algorithms too short (length=%d)\n", length)
 			} else {
 				l := int(data[0])<<8 | int(data[1])
 				if l%2 == 1 || l+2 != length {
-					fmt.Printf("DEBUG: FAIL - signature_algorithms invalid length (l=%d, total length=%d)\n", l, length)
 				} else {
 					num := l / 2
 					m.SignatureAlgorithms = make([]uint16, num)
@@ -822,17 +733,13 @@ func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 						m.SignatureAlgorithms[i] = uint16(d[0])<<8 | uint16(d[1])
 						d = d[2:]
 					}
-					fmt.Printf("DEBUG: Parsed %d signature algorithms\n", num)
 				}
 			}
 		case 43: // extension supported_versions
-			fmt.Printf("DEBUG: Parsing supported_versions extension\n")
 			if length < 1 {
-				fmt.Printf("DEBUG: FAIL - supported_versions too short (length=%d)\n", length)
 			} else {
 				l := int(data[0])
 				if l%2 == 1 || l+1 != length {
-					fmt.Printf("DEBUG: FAIL - supported_versions invalid length (l=%d, total length=%d)\n", l, length)
 				} else {
 					num := l / 2
 					m.SupportedVersions = make([]uint16, num)
@@ -841,16 +748,12 @@ func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 						m.SupportedVersions[i] = uint16(d[0])<<8 | uint16(d[1])
 						d = d[2:]
 					}
-					fmt.Printf("DEBUG: Parsed %d supported versions\n", num)
 				}
 			}
 		default:
-			fmt.Printf("DEBUG: Skipping unknown extension 0x%04x (len=%d)\n", extension, length)
 		}
 		data = data[length:]
-		fmt.Printf("DEBUG: Advanced past extension, remaining data len=%d\n", len(data))
 	}
 
-	fmt.Printf("DEBUG: unmarshal completed successfully\n")
 	return true
 }
